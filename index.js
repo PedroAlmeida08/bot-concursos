@@ -2,7 +2,12 @@ const Parser = require('rss-parser');
 const cheerio = require('cheerio');
 const fs = require('fs');
 
-const parser = new Parser();
+const parser = new Parser({
+  timeout: 10000,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  }
+});
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -27,11 +32,19 @@ if (!db.blacklist) db.blacklist = db.termos || [];
 if (!db.watchlist) db.watchlist = ["bndes", "epe"];
 
 async function enviarMensagemTelegram(texto) {
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: CHAT_ID, text: texto, parse_mode: 'Markdown' })
-  });
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT_ID, text: texto, parse_mode: 'Markdown' })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error("Erro na API do Telegram:", data.description);
+    }
+  } catch (err) {
+    console.error("Erro ao enviar mensagem Telegram:", err.message);
+  }
 }
 
 // --- PROCESSAMENTO DE COMANDOS DO TELEGRAM ---
@@ -114,7 +127,8 @@ async function buscarEditalAnteriorNoGoogle(nomeConcurso) {
 }
 
 async function extrairDadosComIA(textoPagina) {
-  const prompt = `
+  try {
+    const prompt = `
     Analise o texto do concurso abaixo e responda ESTRITAMENTE em formato JSON.
     {
       "nomeConcurso": "Nome do Órgão/Concurso",
@@ -132,17 +146,25 @@ async function extrairDadosComIA(textoPagina) {
     Texto: ${textoPagina.substring(0, 15000)}
   `;
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json" } 
-    })
-  });
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json" } 
+      })
+    });
 
-  const data = await response.json();
-  return JSON.parse(data.candidates[0].content.parts[0].text);
+    const data = await response.json();
+    if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+      return JSON.parse(data.candidates[0].content.parts[0].text);
+    }
+    console.error("Resposta inesperada do Gemini:", JSON.stringify(data));
+    return null;
+  } catch (error) {
+    console.error("Erro na extração com IA:", error.message);
+    return null;
+  }
 }
 
 async function buscarTextoDaPagina(url) {
@@ -158,15 +180,12 @@ async function buscarTextoDaPagina(url) {
 
 // --- VARIÁVEIS DE MONITORAMENTO ---
 const feeds = [
-  'https://www.pciconcursos.com.br/rss/sudeste/',
-  'https://www.pciconcursos.com.br/rss/nacional/',
-  'https://www.pciconcursos.com.br/rss/informatica/',
   'https://blog.grancursosonline.com.br/feed/',
   'https://www.estrategiaconcursos.com.br/blog/feed/',
-  'https://www.direcaoconcursos.com.br/noticias/feed/',
-  'https://jcconcursos.com.br/rss',
-  'https://www.novaconcursos.com.br/portal/feed/', 
-  'https://folhadirigida.com.br/rss/concursos'    
+  'https://www.novaconcursos.com.br/portal/feed/',
+  'https://concursosnobrasil.com/feed/',
+  'https://noticiasconcursos.com.br/feed/',
+  'https://blog.alfaconcursos.com.br/feed/'
 ];
 
 const termosAreaTI = ['ti', 'tecnologia', 'computação', 'informática', 'sistemas', 'dados', 'software', 'desenvolvedor', 'programador', 'analista'];
@@ -180,64 +199,71 @@ async function monitorarConcursos() {
   const ontem = new Date(hoje.getTime() - (24 * 60 * 60 * 1000));
 
   for (const feedUrl of feeds) {
-    const feed = await parser.parseURL(feedUrl);
-    
-    for (const item of feed.items) {
-      const dataPublicacao = new Date(item.pubDate);
-      const titulo = item.title.toLowerCase();
+    try {
+      console.log(`Verificando feed: ${feedUrl}`);
+      const feed = await parser.parseURL(feedUrl);
+      
+      for (const item of feed.items) {
+        const dataPublicacao = new Date(item.pubDate);
+        const titulo = item.title.toLowerCase();
 
-      if (dataPublicacao >= ontem) {
-        
-        // 1. VERIFICAÇÃO DE WATCHLIST (Passe Livre)
-        const estaNaWatchlist = db.watchlist.some(termo => titulo.includes(termo));
-        
-        if (estaNaWatchlist) {
-          console.log(`Radar ativado para: ${item.title}`);
-          const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
-                                `📌 *Notícia:* ${item.title}\n` +
-                                `🔗 [Acessar Notícia Completa](${item.link})`;
-          await enviarMensagemTelegram(mensagemRadar);
-          continue; // Pula a análise de TI e IA para esta notícia
-        }
+        if (dataPublicacao >= ontem) {
+          
+          // 1. VERIFICAÇÃO DE WATCHLIST (Passe Livre)
+          const estaNaWatchlist = db.watchlist.some(termo => titulo.includes(termo));
+          
+          if (estaNaWatchlist) {
+            console.log(`Radar ativado para: ${item.title}`);
+            const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
+                                  `📌 *Notícia:* ${item.title}\n` +
+                                  `🔗 [Acessar Notícia Completa](${item.link})`;
+            await enviarMensagemTelegram(mensagemRadar);
+            continue; // Pula a análise de TI e IA para esta notícia
+          }
 
-        // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
-        const isFeedExclusivoTI = feedUrl.includes('informatica');
-        const mencionaAreaTI = termosAreaTI.some(t => titulo.includes(t));
+          // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
+          const isFeedExclusivoTI = feedUrl.includes('informatica');
+          const mencionaAreaTI = termosAreaTI.some(t => titulo.includes(t));
 
-        if (isFeedExclusivoTI || mencionaAreaTI) {
-          const textoCompleto = await buscarTextoDaPagina(item.link);
-          const textoLower = textoCompleto.toLowerCase();
-          const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
+          if (isFeedExclusivoTI || mencionaAreaTI) {
+            const textoCompleto = await buscarTextoDaPagina(item.link);
+            const textoLower = textoCompleto.toLowerCase();
+            const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
 
-          if (temIndicioProvaRJ && textoCompleto.length > 500) {
-            const dadosGerais = await extrairDadosComIA(textoCompleto);
-            const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
-            
-            const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
+            if (temIndicioProvaRJ && textoCompleto.length > 500) {
+              const dadosGerais = await extrairDadosComIA(textoCompleto);
+              if (!dadosGerais || !dadosGerais.nomeConcurso) continue;
 
-            if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
+              const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
               
-              let linkEditalAnterior = dadosGerais.siteUltimoConcurso;
-              if (linkEditalAnterior === "Não informado") {
-                linkEditalAnterior = await buscarEditalAnteriorNoGoogle(dadosGerais.nomeConcurso);
+              const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
+
+              if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
+                
+                let linkEditalAnterior = dadosGerais.siteUltimoConcurso;
+                if (linkEditalAnterior === "Não informado") {
+                  linkEditalAnterior = await buscarEditalAnteriorNoGoogle(dadosGerais.nomeConcurso);
+                }
+
+                const mensagem = `🚨 *Nova Oportunidade (TI): ${dadosGerais.nomeConcurso}*\n\n` +
+                                 `*Status:* ${dadosGerais.estado}\n` +
+                                 `*Banca:* ${dadosGerais.banca}\n` +
+                                 `*Remuneração:* ${dadosGerais.remuneracao}\n` +
+                                 `*Lotação (Trabalho):* ${dadosGerais.locaisTrabalho}\n` +
+                                 `*Local de Prova:* ${dadosGerais.locaisProva}\n` +
+                                 `*Jornada:* ${dadosGerais.modeloTrabalho}\n` +
+                                 `*Provas:* ${dadosGerais.tipoProva}\n\n` +
+                                 `*Edital Anterior:* ${linkEditalAnterior}\n\n` +
+                                 `🔗 [Acessar Notícia Completa](${item.link})`;
+
+                await enviarMensagemTelegram(mensagem);
               }
-
-              const mensagem = `🚨 *Nova Oportunidade (TI): ${dadosGerais.nomeConcurso}*\n\n` +
-                               `*Status:* ${dadosGerais.estado}\n` +
-                               `*Banca:* ${dadosGerais.banca}\n` +
-                               `*Remuneração:* ${dadosGerais.remuneracao}\n` +
-                               `*Lotação (Trabalho):* ${dadosGerais.locaisTrabalho}\n` +
-                               `*Local de Prova:* ${dadosGerais.locaisProva}\n` +
-                               `*Jornada:* ${dadosGerais.modeloTrabalho}\n` +
-                               `*Provas:* ${dadosGerais.tipoProva}\n\n` +
-                               `*Edital Anterior:* ${linkEditalAnterior}\n\n` +
-                               `🔗 [Acessar Notícia Completa](${item.link})`;
-
-              await enviarMensagemTelegram(mensagem);
             }
           }
         }
       }
+    } catch (feedError) {
+      console.error(`Erro ao carregar feed (${feedUrl}):`, feedError.message);
     }
   }
 }
