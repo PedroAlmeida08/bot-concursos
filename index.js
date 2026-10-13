@@ -1,5 +1,6 @@
 const Parser = require('rss-parser');
 const cheerio = require('cheerio');
+const fs = require('fs');
 
 const parser = new Parser();
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -8,30 +9,68 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY;
 const GOOGLE_SEARCH_CX = process.env.GOOGLE_SEARCH_CX;
 
-const feeds = [
-  'https://www.pciconcursos.com.br/rss/sudeste/',
-  'https://www.pciconcursos.com.br/rss/nacional/',
-  'https://www.pciconcursos.com.br/rss/informatica/',
-  'https://blog.grancursosonline.com.br/feed/',
-  'https://www.estrategiaconcursos.com.br/blog/feed/',
-  'https://www.direcaoconcursos.com.br/noticias/feed/',
-  'https://jcconcursos.com.br/rss',
-  'https://www.novaconcursos.com.br/portal/feed/',
-  'https://folhadirigida.com.br/rss/concursos'
-];
-// O filtro principal agora é focado estritamente na CARREIRA
-const termosAreaTI = [
-  'ti', 'tecnologia', 'computação', 'informática', 
-  'sistemas', 'dados', 'software', 'desenvolvedor', 
-  'programador', 'analista'
-];
+// --- CONFIGURAÇÃO DA BLACKLIST ---
+const BLACKLIST_FILE = 'blacklist.json';
 
-// Termos para fazer um pré-filtro no texto antes de gastar a API do Gemini
-const indiciosProvaRJ = [
-  'rio de janeiro', ' rj ', 'niterói', 'são gonçalo', 
-  'nacional', 'todas as capitais', 'principais capitais'
-];
+if (!fs.existsSync(BLACKLIST_FILE)) {
+  fs.writeFileSync(BLACKLIST_FILE, JSON.stringify({ lastUpdateId: 0, termos: [] }));
+}
+let db = JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf-8'));
 
+async function enviarMensagemTelegram(texto) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: CHAT_ID, text: texto, parse_mode: 'Markdown' })
+  });
+}
+
+// --- FUNÇÃO PARA PROCESSAR COMANDOS DO USUÁRIO ---
+async function processarComandosTelegram() {
+  console.log("Checando novos comandos no Telegram...");
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${db.lastUpdateId + 1}`;
+  
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    let respostas = [];
+
+    if (data.ok && data.result.length > 0) {
+      for (const update of data.result) {
+        db.lastUpdateId = update.update_id; 
+        
+        if (!update.message || !update.message.text) continue;
+        const texto = update.message.text.trim().toLowerCase();
+
+        // Lógica dos Comandos
+        if (texto.startsWith('/add_blacklist ')) {
+          const termo = texto.replace('/add_blacklist ', '').trim();
+          if (!db.termos.includes(termo)) db.termos.push(termo);
+          respostas.push(`🚫 '${termo}' foi adicionado à sua blacklist.`);
+        } 
+        else if (texto.startsWith('/remove_blacklist ')) {
+          const termo = texto.replace('/remove_blacklist ', '').trim();
+          db.termos = db.termos.filter(t => t !== termo);
+          respostas.push(`✅ '${termo}' foi removido da sua blacklist.`);
+        } 
+        else if (texto === '/blacklist') {
+          respostas.push(db.termos.length > 0 ? `📋 *Sua Blacklist:*\n- ${db.termos.join('\n- ')}` : `📋 Sua blacklist está vazia.`);
+        } 
+        else if (texto === '/reset_blacklist') {
+          db.termos = [];
+          respostas.push(`♻️ Blacklist zerada com sucesso!`);
+        }
+      }
+
+      fs.writeFileSync(BLACKLIST_FILE, JSON.stringify(db, null, 2));
+      if (respostas.length > 0) await enviarMensagemTelegram(respostas.join('\n\n'));
+    }
+  } catch (error) {
+    console.error("Erro ao ler comandos do Telegram:", error);
+  }
+}
+
+// --- FUNÇÕES DE BUSCA E IA ---
 async function buscarEditalAnteriorNoGoogle(nomeConcurso) {
   const query = encodeURIComponent(`edital anterior concurso ${nomeConcurso}`);
   const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_SEARCH_API_KEY}&cx=${GOOGLE_SEARCH_CX}&q=${query}&num=1`;
@@ -91,7 +130,26 @@ async function buscarTextoDaPagina(url) {
   }
 }
 
+// --- VARIÁVEIS DE MONITORAMENTO ---
+const feeds = [
+  'https://www.pciconcursos.com.br/rss/sudeste/',
+  'https://www.pciconcursos.com.br/rss/nacional/',
+  'https://www.pciconcursos.com.br/rss/informatica/',
+  'https://blog.grancursosonline.com.br/feed/',
+  'https://www.estrategiaconcursos.com.br/blog/feed/',
+  'https://www.direcaoconcursos.com.br/noticias/feed/',
+  'https://jcconcursos.com.br/rss',
+  'https://www.novaconcursos.com.br/portal/feed/', 
+  'https://folhadirigida.com.br/rss/concursos'    
+];
+
+const termosAreaTI = ['ti', 'tecnologia', 'computação', 'informática', 'sistemas', 'dados', 'software', 'desenvolvedor', 'programador', 'analista'];
+const indiciosProvaRJ = ['rio de janeiro', ' rj ', 'niterói', 'são gonçalo', 'nacional', 'todas as capitais', 'principais capitais'];
+
+// --- LOOP PRINCIPAL ---
 async function monitorarConcursos() {
+  await processarComandosTelegram();
+
   const hoje = new Date();
   const ontem = new Date(hoje.getTime() - (24 * 60 * 60 * 1000));
 
@@ -106,22 +164,18 @@ async function monitorarConcursos() {
         const isFeedExclusivoTI = feedUrl.includes('informatica');
         const mencionaAreaTI = termosAreaTI.some(t => titulo.includes(t));
 
-        // Se a vaga for de TI, avançamos para investigar o local
         if (isFeedExclusivoTI || mencionaAreaTI) {
-          console.log(`Verificando texto de: ${item.title}`);
-          
           const textoCompleto = await buscarTextoDaPagina(item.link);
           const textoLower = textoCompleto.toLowerCase();
-          
-          // Pré-filtro: O texto fala de RJ ou provas nacionais?
           const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
 
           if (temIndicioProvaRJ && textoCompleto.length > 500) {
-            console.log(`Enviando para a IA analisar os locais de prova: ${item.title}`);
             const dadosGerais = await extrairDadosComIA(textoCompleto);
+            const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
             
-            // O FILTRO FINAL: A IA confirmou que a prova pode ser feita no RJ?
-            if (dadosGerais.aplicaProvaRJ === true) {
+            const estaNaBlacklist = db.termos.some(termo => nomeConcursoLower.includes(termo));
+
+            if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
               
               let linkEditalAnterior = dadosGerais.siteUltimoConcurso;
               if (linkEditalAnterior === "Não informado") {
@@ -139,17 +193,7 @@ async function monitorarConcursos() {
                                `*Edital Anterior:* ${linkEditalAnterior}\n\n` +
                                `🔗 [Acessar Notícia Completa](${item.link})`;
 
-              await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: CHAT_ID,
-                  text: mensagem,
-                  parse_mode: 'Markdown'
-                })
-              });
-            } else {
-              console.log(`Descartado: Vaga de TI, mas a prova NÃO é no RJ. (${item.title})`);
+              await enviarMensagemTelegram(mensagem);
             }
           }
         }
