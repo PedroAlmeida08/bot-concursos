@@ -216,8 +216,7 @@ async function extrairDadosComIA(textoPagina) {
     return null;
   }
 
-  try {
-    const prompt = `
+  const prompt = `
     Analise o texto do concurso abaixo e responda ESTRITAMENTE em formato JSON.
     {
       "nomeConcurso": "Nome do Órgão/Concurso",
@@ -235,26 +234,37 @@ async function extrairDadosComIA(textoPagina) {
     Texto: ${textoPagina.substring(0, 15000)}
   `;
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: "application/json" } 
-      })
-    });
+  // gemini-flash-lite-latest possui limite gratuito muito mais generoso (1.500 req/dia vs 20 req/dia do 3.8-flash)
+  const modelos = ['gemini-flash-lite-latest', 'gemini-3.8-flash'];
 
-    const data = await response.json();
-    const textoJson = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text;
-    if (textoJson) {
-      return JSON.parse(textoJson);
+  for (const modelo of modelos) {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json" } 
+        })
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        console.warn(`Aviso no modelo ${modelo} (${data.error.code}):`, data.error.message?.slice(0, 120));
+        if (data.error.code === 429) continue; // Tenta o modelo alternativo se atingir limite de cota
+        return null;
+      }
+
+      const textoJson = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text;
+      if (textoJson) {
+        return JSON.parse(textoJson);
+      }
+    } catch (error) {
+      console.error(`Erro ao chamar modelo ${modelo}:`, error.message);
     }
-    console.error("Resposta inesperada do Gemini:", JSON.stringify(data));
-    return null;
-  } catch (error) {
-    console.error("Erro na extração com IA:", error.message);
-    return null;
   }
+
+  return null;
 }
 
 async function buscarTextoDaPagina(url) {
@@ -278,7 +288,8 @@ const feeds = [
   'https://blog.alfaconcursos.com.br/feed/'
 ];
 
-const termosAreaTI = ['ti', 'tecnologia', 'computação', 'informática', 'sistemas', 'dados', 'software', 'desenvolvedor', 'programador', 'analista'];
+// Regex com limites de palavra (\b) para evitar falsos positivos como "participar", "garantir", "analista administrativo"
+const regexTI = /\b(ti|t\.i\.|tecnologia da informação|tecnologia da informacao|ciência da computação|ciencia da computacao|computação|computacao|informática|informatica|desenvolvedor|desenvolvedora|programador|programadora|software|engenharia de software|segurança da informação|seguranca da informacao|analista de ti|analista de sistemas|analista de dados|cientista de dados|banco de dados)\b/i;
 const indiciosProvaRJ = ['rio de janeiro', ' rj ', 'niterói', 'são gonçalo', 'nacional', 'todas as capitais', 'principais capitais'];
 
 function validarConfiguracoes() {
@@ -338,7 +349,7 @@ async function monitorarConcursos() {
 
         // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
         const isFeedExclusivoTI = feedUrl.includes('informatica');
-        const mencionaAreaTI = termosAreaTI.some(t => textoItem.includes(t));
+        const mencionaAreaTI = regexTI.test(textoItem);
 
         if (isFeedExclusivoTI || mencionaAreaTI) {
           const textoCompleto = await buscarTextoDaPagina(item.link);
@@ -346,6 +357,7 @@ async function monitorarConcursos() {
           const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
 
           if (temIndicioProvaRJ && textoCompleto.length > 500) {
+            await sleep(1500); // Pausa para respeitar os limites de requisições por minuto da IA
             const dadosGerais = await extrairDadosComIA(textoCompleto);
             if (!dadosGerais || !dadosGerais.nomeConcurso) continue;
 
