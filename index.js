@@ -9,13 +9,22 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY;
 const GOOGLE_SEARCH_CX = process.env.GOOGLE_SEARCH_CX;
 
-// --- CONFIGURAÇÃO DA BLACKLIST ---
-const BLACKLIST_FILE = 'blacklist.json';
+// --- CONFIGURAÇÃO DO BANCO DE DADOS LOCAL ---
+const DB_FILE = 'database.json';
 
-if (!fs.existsSync(BLACKLIST_FILE)) {
-  fs.writeFileSync(BLACKLIST_FILE, JSON.stringify({ lastUpdateId: 0, termos: [] }));
+if (!fs.existsSync(DB_FILE)) {
+  // Inicializado com órgãos de interesse como exemplo de watchlist padrão
+  fs.writeFileSync(DB_FILE, JSON.stringify({ 
+    lastUpdateId: 0, 
+    blacklist: [], 
+    watchlist: ["bndes", "epe"] 
+  }));
 }
-let db = JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf-8'));
+let db = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+
+// Garante compatibilidade caso o arquivo antigo (só com blacklist) ainda exista
+if (!db.blacklist) db.blacklist = db.termos || [];
+if (!db.watchlist) db.watchlist = ["bndes", "epe"];
 
 async function enviarMensagemTelegram(texto) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
@@ -25,7 +34,7 @@ async function enviarMensagemTelegram(texto) {
   });
 }
 
-// --- FUNÇÃO PARA PROCESSAR COMANDOS DO USUÁRIO ---
+// --- PROCESSAMENTO DE COMANDOS DO TELEGRAM ---
 async function processarComandosTelegram() {
   console.log("Checando novos comandos no Telegram...");
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${db.lastUpdateId + 1}`;
@@ -42,27 +51,46 @@ async function processarComandosTelegram() {
         if (!update.message || !update.message.text) continue;
         const texto = update.message.text.trim().toLowerCase();
 
-        // Lógica dos Comandos
+        // Comandos da Blacklist
         if (texto.startsWith('/add_blacklist ')) {
           const termo = texto.replace('/add_blacklist ', '').trim();
-          if (!db.termos.includes(termo)) db.termos.push(termo);
-          respostas.push(`🚫 '${termo}' foi adicionado à sua blacklist.`);
+          if (!db.blacklist.includes(termo)) db.blacklist.push(termo);
+          respostas.push(`🚫 '${termo}' adicionado à Blacklist.`);
         } 
         else if (texto.startsWith('/remove_blacklist ')) {
           const termo = texto.replace('/remove_blacklist ', '').trim();
-          db.termos = db.termos.filter(t => t !== termo);
-          respostas.push(`✅ '${termo}' foi removido da sua blacklist.`);
+          db.blacklist = db.blacklist.filter(t => t !== termo);
+          respostas.push(`✅ '${termo}' removido da Blacklist.`);
         } 
         else if (texto === '/blacklist') {
-          respostas.push(db.termos.length > 0 ? `📋 *Sua Blacklist:*\n- ${db.termos.join('\n- ')}` : `📋 Sua blacklist está vazia.`);
+          respostas.push(db.blacklist.length > 0 ? `📋 *Blacklist:*\n- ${db.blacklist.join('\n- ')}` : `📋 Blacklist vazia.`);
         } 
         else if (texto === '/reset_blacklist') {
-          db.termos = [];
-          respostas.push(`♻️ Blacklist zerada com sucesso!`);
+          db.blacklist = [];
+          respostas.push(`♻️ Blacklist zerada!`);
+        }
+        
+        // Comandos da Watchlist
+        else if (texto.startsWith('/add_watchlist ')) {
+          const termo = texto.replace('/add_watchlist ', '').trim();
+          if (!db.watchlist.includes(termo)) db.watchlist.push(termo);
+          respostas.push(`🎯 '${termo}' adicionado à Watchlist.`);
+        } 
+        else if (texto.startsWith('/remove_watchlist ')) {
+          const termo = texto.replace('/remove_watchlist ', '').trim();
+          db.watchlist = db.watchlist.filter(t => t !== termo);
+          respostas.push(`✅ '${termo}' removido da Watchlist.`);
+        } 
+        else if (texto === '/watchlist') {
+          respostas.push(db.watchlist.length > 0 ? `📡 *Radar (Watchlist):*\n- ${db.watchlist.join('\n- ')}` : `📡 Watchlist vazia.`);
+        } 
+        else if (texto === '/reset_watchlist') {
+          db.watchlist = [];
+          respostas.push(`♻️ Watchlist zerada!`);
         }
       }
 
-      fs.writeFileSync(BLACKLIST_FILE, JSON.stringify(db, null, 2));
+      fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
       if (respostas.length > 0) await enviarMensagemTelegram(respostas.join('\n\n'));
     }
   } catch (error) {
@@ -88,15 +116,13 @@ async function buscarEditalAnteriorNoGoogle(nomeConcurso) {
 async function extrairDadosComIA(textoPagina) {
   const prompt = `
     Analise o texto do concurso abaixo e responda ESTRITAMENTE em formato JSON.
-    ATENÇÃO: Diferencie claramente o local onde o aprovado vai TRABALHAR do local onde a PROVA será aplicada.
-    
     {
       "nomeConcurso": "Nome do Órgão/Concurso",
       "estado": "Previsto / Inscrições Abertas / etc",
       "remuneracao": "R$ X + Benefícios",
-      "locaisTrabalho": "Cidades/Estados onde estão as vagas (Ex: Brasília/DF, Nacional, etc)",
+      "locaisTrabalho": "Cidades/Estados onde estão as vagas",
       "locaisProva": "Cidades/Estados onde as provas serão aplicadas",
-      "aplicaProvaRJ": true, // Retorne o booleano TRUE se a prova for aplicada no estado do RJ (Rio, Niterói, etc) ou se for prova Nacional em todas as capitais. Caso contrário, FALSE.
+      "aplicaProvaRJ": true, 
       "modeloTrabalho": "Presencial/Remoto e Carga Horária",
       "tipoProva": "Discursiva/Objetiva/Ambos",
       "banca": "Nome da Banca",
@@ -161,6 +187,20 @@ async function monitorarConcursos() {
       const titulo = item.title.toLowerCase();
 
       if (dataPublicacao >= ontem) {
+        
+        // 1. VERIFICAÇÃO DE WATCHLIST (Passe Livre)
+        const estaNaWatchlist = db.watchlist.some(termo => titulo.includes(termo));
+        
+        if (estaNaWatchlist) {
+          console.log(`Radar ativado para: ${item.title}`);
+          const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
+                                `📌 *Notícia:* ${item.title}\n` +
+                                `🔗 [Acessar Notícia Completa](${item.link})`;
+          await enviarMensagemTelegram(mensagemRadar);
+          continue; // Pula a análise de TI e IA para esta notícia
+        }
+
+        // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
         const isFeedExclusivoTI = feedUrl.includes('informatica');
         const mencionaAreaTI = termosAreaTI.some(t => titulo.includes(t));
 
@@ -173,7 +213,7 @@ async function monitorarConcursos() {
             const dadosGerais = await extrairDadosComIA(textoCompleto);
             const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
             
-            const estaNaBlacklist = db.termos.some(termo => nomeConcursoLower.includes(termo));
+            const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
 
             if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
               
@@ -182,7 +222,7 @@ async function monitorarConcursos() {
                 linkEditalAnterior = await buscarEditalAnteriorNoGoogle(dadosGerais.nomeConcurso);
               }
 
-              const mensagem = `🚨 *Nova Oportunidade: ${dadosGerais.nomeConcurso}*\n\n` +
+              const mensagem = `🚨 *Nova Oportunidade (TI): ${dadosGerais.nomeConcurso}*\n\n` +
                                `*Status:* ${dadosGerais.estado}\n` +
                                `*Banca:* ${dadosGerais.banca}\n` +
                                `*Remuneração:* ${dadosGerais.remuneracao}\n` +
