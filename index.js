@@ -55,9 +55,10 @@ function registrarLink(link) {
   }
 }
 
-async function enviarMensagemTelegram(texto) {
-  if (!TELEGRAM_TOKEN || !CHAT_ID) {
-    console.warn("TELEGRAM_TOKEN ou TELEGRAM_CHAT_ID não definidos.");
+async function enviarMensagemTelegram(texto, chatIdPersonalizado = null) {
+  const targetChatId = chatIdPersonalizado || CHAT_ID;
+  if (!TELEGRAM_TOKEN || !targetChatId) {
+    console.warn("TELEGRAM_TOKEN ou CHAT_ID não definidos.");
     return;
   }
 
@@ -65,16 +66,16 @@ async function enviarMensagemTelegram(texto) {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: CHAT_ID, text: texto, parse_mode: 'Markdown' })
+      body: JSON.stringify({ chat_id: targetChatId, text: texto, parse_mode: 'Markdown' })
     });
     const data = await res.json();
     if (!data.ok) {
       console.warn("Aviso na API do Telegram (tentando sem formatação):", data.description);
-      // Fallback sem formatação Markdown caso caracteres especiais da notícia causem erro de parse
+      // Fallback sem formatação Markdown caso caracteres especiais causem erro de parse
       await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: CHAT_ID, text: texto.replace(/[*_`\[\]]/g, '') })
+        body: JSON.stringify({ chat_id: targetChatId, text: texto.replace(/[*_`\[\]]/g, '') })
       });
     }
   } catch (err) {
@@ -93,18 +94,25 @@ async function processarComandosTelegram() {
   try {
     const res = await fetch(url);
     const data = await res.json();
-    let respostas = [];
 
     if (data.ok && data.result.length > 0) {
       for (const update of data.result) {
         db.lastUpdateId = update.update_id; 
         
         if (!update.message || !update.message.text) continue;
-        const texto = update.message.text.trim().toLowerCase();
+        const chatOrigem = update.message.chat.id;
+        const textoOriginal = update.message.text.trim();
+        const partes = textoOriginal.split(/\s+/);
+        // Normaliza o comando removendo @nomedobot caso venha do menu ou de grupo (ex: /start@meu_bot -> /start)
+        const comando = partes[0].toLowerCase().split('@')[0];
+        const argumento = partes.slice(1).join(' ').trim();
+        const argumentoLower = argumento.toLowerCase();
+
+        let resposta = null;
 
         // Ajuda e Boas-Vindas
-        if (texto === '/start' || texto === '/help' || texto === '/ajuda') {
-          respostas.push(
+        if (comando === '/start' || comando === '/help' || comando === '/ajuda') {
+          resposta = 
             `🤖 *Comandos do Monitor de Concursos:*\n\n` +
             `*Radar (Watchlist):*\n` +
             `• \`/add_watchlist <termo>\` - Notifica sobre qualquer notícia do órgão\n` +
@@ -115,51 +123,69 @@ async function processarComandosTelegram() {
             `• \`/add_blacklist <termo>\` - Ignora concursos deste órgão\n` +
             `• \`/remove_blacklist <termo>\` - Remove da Blacklist\n` +
             `• \`/blacklist\` - Lista termos bloqueados\n` +
-            `• \`/reset_blacklist\` - Zera a Blacklist`
-          );
+            `• \`/reset_blacklist\` - Zera a Blacklist`;
         }
 
         // Comandos da Blacklist
-        else if (texto.startsWith('/add_blacklist ')) {
-          const termo = texto.replace('/add_blacklist ', '').trim();
-          if (!db.blacklist.includes(termo)) db.blacklist.push(termo);
-          respostas.push(`🚫 '${termo}' adicionado à Blacklist.`);
+        else if (comando === '/add_blacklist') {
+          if (!argumentoLower) {
+            resposta = `⚠️ Informe o termo a bloquear. Exemplo: \`/add_blacklist prefeitura\``;
+          } else {
+            if (!db.blacklist.includes(argumentoLower)) db.blacklist.push(argumentoLower);
+            resposta = `🚫 '${argumentoLower}' adicionado à Blacklist.`;
+          }
         } 
-        else if (texto.startsWith('/remove_blacklist ')) {
-          const termo = texto.replace('/remove_blacklist ', '').trim();
-          db.blacklist = db.blacklist.filter(t => t !== termo);
-          respostas.push(`✅ '${termo}' removido da Blacklist.`);
+        else if (comando === '/remove_blacklist') {
+          if (!argumentoLower) {
+            resposta = `⚠️ Informe o termo a remover. Exemplo: \`/remove_blacklist prefeitura\``;
+          } else {
+            db.blacklist = db.blacklist.filter(t => t !== argumentoLower);
+            resposta = `✅ '${argumentoLower}' removido da Blacklist.`;
+          }
         } 
-        else if (texto === '/blacklist') {
-          respostas.push(db.blacklist.length > 0 ? `📋 *Blacklist:*\n- ${db.blacklist.join('\n- ')}` : `📋 Blacklist vazia.`);
+        else if (comando === '/blacklist') {
+          resposta = db.blacklist.length > 0 
+            ? `📋 *Blacklist:*\n- ${db.blacklist.join('\n- ')}` 
+            : `📋 Blacklist vazia.`;
         } 
-        else if (texto === '/reset_blacklist') {
+        else if (comando === '/reset_blacklist') {
           db.blacklist = [];
-          respostas.push(`♻️ Blacklist zerada!`);
+          resposta = `♻️ Blacklist zerada!`;
         }
         
         // Comandos da Watchlist
-        else if (texto.startsWith('/add_watchlist ')) {
-          const termo = texto.replace('/add_watchlist ', '').trim();
-          if (!db.watchlist.includes(termo)) db.watchlist.push(termo);
-          respostas.push(`🎯 '${termo}' adicionado à Watchlist.`);
+        else if (comando === '/add_watchlist') {
+          if (!argumentoLower) {
+            resposta = `⚠️ Informe o órgão para o Radar. Exemplo: \`/add_watchlist bndes\``;
+          } else {
+            if (!db.watchlist.includes(argumentoLower)) db.watchlist.push(argumentoLower);
+            resposta = `🎯 '${argumentoLower}' adicionado à Watchlist.`;
+          }
         } 
-        else if (texto.startsWith('/remove_watchlist ')) {
-          const termo = texto.replace('/remove_watchlist ', '').trim();
-          db.watchlist = db.watchlist.filter(t => t !== termo);
-          respostas.push(`✅ '${termo}' removido da Watchlist.`);
+        else if (comando === '/remove_watchlist') {
+          if (!argumentoLower) {
+            resposta = `⚠️ Informe o termo a remover. Exemplo: \`/remove_watchlist bndes\``;
+          } else {
+            db.watchlist = db.watchlist.filter(t => t !== argumentoLower);
+            resposta = `✅ '${argumentoLower}' removido da Watchlist.`;
+          }
         } 
-        else if (texto === '/watchlist') {
-          respostas.push(db.watchlist.length > 0 ? `📡 *Radar (Watchlist):*\n- ${db.watchlist.join('\n- ')}` : `📡 Watchlist vazia.`);
+        else if (comando === '/watchlist') {
+          resposta = db.watchlist.length > 0 
+            ? `📡 *Radar (Watchlist):*\n- ${db.watchlist.join('\n- ')}` 
+            : `📡 Watchlist vazia.`;
         } 
-        else if (texto === '/reset_watchlist') {
+        else if (comando === '/reset_watchlist') {
           db.watchlist = [];
-          respostas.push(`♻️ Watchlist zerada!`);
+          resposta = `♻️ Watchlist zerada!`;
+        }
+
+        if (resposta) {
+          await enviarMensagemTelegram(resposta, chatOrigem);
         }
       }
 
       salvarDatabase();
-      if (respostas.length > 0) await enviarMensagemTelegram(respostas.join('\n\n'));
     }
   } catch (error) {
     console.error("Erro ao ler comandos do Telegram:", error);
