@@ -1,0 +1,26 @@
+{
+  "name": "bot-concursos",
+  "version": "1.0.0",
+  "description": "Bot de Telegram para monitorar concursos de nível médio ou superior em Ciência da Computação cuja prova acontece no estado do Rio de Janeiro.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PedroAlmeida08/bot-concursos.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/PedroAlmeida08/bot-concursos/issues"
+  },
+  "homepage": "https://github.com/PedroAlmeida08/bot-concursos#readme",
+  "dependencies": {
+    "axios": "^1.20.0",
+    "cheerio": "^1.2.0",
+    "rss-parser": "^3.13.0"
+  }
+}
