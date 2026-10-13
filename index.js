@@ -10,14 +10,15 @@ const GOOGLE_SEARCH_CX = process.env.GOOGLE_SEARCH_CX;
 
 const feeds = [
   'https://www.pciconcursos.com.br/rss/sudeste/',
-  'https://www.pciconcursos.com.br/rss/nacional/', // Adicionado o Nacional para não perder vagas federais
+  'https://www.pciconcursos.com.br/rss/nacional/',
   'https://www.pciconcursos.com.br/rss/informatica/',
   'https://blog.grancursosonline.com.br/feed/',
   'https://www.estrategiaconcursos.com.br/blog/feed/',
   'https://www.direcaoconcursos.com.br/noticias/feed/',
-  'https://jcconcursos.com.br/rss'
+  'https://jcconcursos.com.br/rss',
+  'https://www.novaconcursos.com.br/portal/feed/',
+  'https://folhadirigida.com.br/rss/concursos'
 ];
-
 // O filtro principal agora é focado estritamente na CARREIRA
 const termosAreaTI = [
   'ti', 'tecnologia', 'computação', 'informática', 
