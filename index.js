@@ -1,3 +1,7 @@
+if (typeof process.loadEnvFile === 'function') {
+  try { process.loadEnvFile(); } catch (e) { /* Arquivo .env opcional para execução local */ }
+}
+
 const Parser = require('rss-parser');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -8,30 +12,55 @@ const parser = new Parser({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   }
 });
+
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY;
 const GOOGLE_SEARCH_CX = process.env.GOOGLE_SEARCH_CX;
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // --- CONFIGURAÇÃO DO BANCO DE DADOS LOCAL ---
 const DB_FILE = 'database.json';
 
 if (!fs.existsSync(DB_FILE)) {
-  // Inicializado com órgãos de interesse como exemplo de watchlist padrão
   fs.writeFileSync(DB_FILE, JSON.stringify({ 
     lastUpdateId: 0, 
     blacklist: [], 
-    watchlist: ["bndes", "epe"] 
-  }));
+    watchlist: ["bndes", "epe"],
+    notifiedLinks: []
+  }, null, 2));
 }
+
 let db = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
 
-// Garante compatibilidade caso o arquivo antigo (só com blacklist) ainda exista
 if (!db.blacklist) db.blacklist = db.termos || [];
 if (!db.watchlist) db.watchlist = ["bndes", "epe"];
+if (!db.notifiedLinks) db.notifiedLinks = [];
+
+function salvarDatabase() {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+function registrarLink(link) {
+  if (!link) return;
+  if (!db.notifiedLinks.includes(link)) {
+    db.notifiedLinks.push(link);
+    // Limita o histórico aos últimos 500 links para não inflar o arquivo
+    if (db.notifiedLinks.length > 500) {
+      db.notifiedLinks = db.notifiedLinks.slice(-500);
+    }
+    salvarDatabase();
+  }
+}
 
 async function enviarMensagemTelegram(texto) {
+  if (!TELEGRAM_TOKEN || !CHAT_ID) {
+    console.warn("TELEGRAM_TOKEN ou TELEGRAM_CHAT_ID não definidos.");
+    return;
+  }
+
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: 'POST',
@@ -40,15 +69,24 @@ async function enviarMensagemTelegram(texto) {
     });
     const data = await res.json();
     if (!data.ok) {
-      console.error("Erro na API do Telegram:", data.description);
+      console.warn("Aviso na API do Telegram (tentando sem formatação):", data.description);
+      // Fallback sem formatação Markdown caso caracteres especiais da notícia causem erro de parse
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: CHAT_ID, text: texto.replace(/[*_`\[\]]/g, '') })
+      });
     }
   } catch (err) {
     console.error("Erro ao enviar mensagem Telegram:", err.message);
   }
+
+  await sleep(600); // Pausa para respeitar o rate limit do Telegram
 }
 
 // --- PROCESSAMENTO DE COMANDOS DO TELEGRAM ---
 async function processarComandosTelegram() {
+  if (!TELEGRAM_TOKEN) return;
   console.log("Checando novos comandos no Telegram...");
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${db.lastUpdateId + 1}`;
   
@@ -64,8 +102,25 @@ async function processarComandosTelegram() {
         if (!update.message || !update.message.text) continue;
         const texto = update.message.text.trim().toLowerCase();
 
+        // Ajuda e Boas-Vindas
+        if (texto === '/start' || texto === '/help' || texto === '/ajuda') {
+          respostas.push(
+            `🤖 *Comandos do Monitor de Concursos:*\n\n` +
+            `*Radar (Watchlist):*\n` +
+            `• \`/add_watchlist <termo>\` - Notifica sobre qualquer notícia do órgão\n` +
+            `• \`/remove_watchlist <termo>\` - Remove termo do Radar\n` +
+            `• \`/watchlist\` - Lista termos no Radar\n` +
+            `• \`/reset_watchlist\` - Zera o Radar\n\n` +
+            `*Bloqueios (Blacklist):*\n` +
+            `• \`/add_blacklist <termo>\` - Ignora concursos deste órgão\n` +
+            `• \`/remove_blacklist <termo>\` - Remove da Blacklist\n` +
+            `• \`/blacklist\` - Lista termos bloqueados\n` +
+            `• \`/reset_blacklist\` - Zera a Blacklist`
+          );
+        }
+
         // Comandos da Blacklist
-        if (texto.startsWith('/add_blacklist ')) {
+        else if (texto.startsWith('/add_blacklist ')) {
           const termo = texto.replace('/add_blacklist ', '').trim();
           if (!db.blacklist.includes(termo)) db.blacklist.push(termo);
           respostas.push(`🚫 '${termo}' adicionado à Blacklist.`);
@@ -103,7 +158,7 @@ async function processarComandosTelegram() {
         }
       }
 
-      fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+      salvarDatabase();
       if (respostas.length > 0) await enviarMensagemTelegram(respostas.join('\n\n'));
     }
   } catch (error) {
@@ -113,6 +168,9 @@ async function processarComandosTelegram() {
 
 // --- FUNÇÕES DE BUSCA E IA ---
 async function buscarEditalAnteriorNoGoogle(nomeConcurso) {
+  if (!GOOGLE_SEARCH_API_KEY || !GOOGLE_SEARCH_CX) {
+    return "Não configurado na busca automática.";
+  }
   const query = encodeURIComponent(`edital anterior concurso ${nomeConcurso}`);
   const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_SEARCH_API_KEY}&cx=${GOOGLE_SEARCH_CX}&q=${query}&num=1`;
 
@@ -127,6 +185,11 @@ async function buscarEditalAnteriorNoGoogle(nomeConcurso) {
 }
 
 async function extrairDadosComIA(textoPagina) {
+  if (!GEMINI_API_KEY) {
+    console.warn("GEMINI_API_KEY não definida.");
+    return null;
+  }
+
   try {
     const prompt = `
     Analise o texto do concurso abaixo e responda ESTRITAMENTE em formato JSON.
@@ -171,7 +234,8 @@ async function buscarTextoDaPagina(url) {
   try {
     const res = await fetch(url);
     const html = await res.text();
-    const $= cheerio.load(html);$('script, style, nav, footer, header').remove();
+    const $ = cheerio.load(html);
+    $('script, style, nav, footer, header').remove();
     return $('body').text().replace(/\s+/g, ' ').trim();
   } catch (e) {
     return "";
@@ -204,60 +268,72 @@ async function monitorarConcursos() {
       const feed = await parser.parseURL(feedUrl);
       
       for (const item of feed.items) {
+        if (!item.link) continue;
+
+        // Evita processar novamente notícias já notificadas ou analisadas
+        if (db.notifiedLinks.includes(item.link)) {
+          continue;
+        }
+
         const dataPublicacao = new Date(item.pubDate);
-        const titulo = item.title.toLowerCase();
+        const dataValida = !isNaN(dataPublicacao.getTime());
+        if (dataValida && dataPublicacao < ontem) {
+          continue;
+        }
 
-        if (dataPublicacao >= ontem) {
-          
-          // 1. VERIFICAÇÃO DE WATCHLIST (Passe Livre)
-          const estaNaWatchlist = db.watchlist.some(termo => titulo.includes(termo));
-          
-          if (estaNaWatchlist) {
-            console.log(`Radar ativado para: ${item.title}`);
-            const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
-                                  `📌 *Notícia:* ${item.title}\n` +
-                                  `🔗 [Acessar Notícia Completa](${item.link})`;
-            await enviarMensagemTelegram(mensagemRadar);
-            continue; // Pula a análise de TI e IA para esta notícia
-          }
+        const textoItem = `${item.title || ''} ${item.contentSnippet || ''}`.toLowerCase();
 
-          // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
-          const isFeedExclusivoTI = feedUrl.includes('informatica');
-          const mencionaAreaTI = termosAreaTI.some(t => titulo.includes(t));
+        // 1. VERIFICAÇÃO DE WATCHLIST (Passe Livre)
+        const estaNaWatchlist = db.watchlist.some(termo => textoItem.includes(termo));
+        
+        if (estaNaWatchlist) {
+          console.log(`Radar ativado para: ${item.title}`);
+          const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
+                                `📌 *Notícia:* ${item.title}\n` +
+                                `🔗 [Acessar Notícia Completa](${item.link})`;
+          await enviarMensagemTelegram(mensagemRadar);
+          registrarLink(item.link);
+          continue;
+        }
 
-          if (isFeedExclusivoTI || mencionaAreaTI) {
-            const textoCompleto = await buscarTextoDaPagina(item.link);
-            const textoLower = textoCompleto.toLowerCase();
-            const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
+        // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
+        const isFeedExclusivoTI = feedUrl.includes('informatica');
+        const mencionaAreaTI = termosAreaTI.some(t => textoItem.includes(t));
 
-            if (temIndicioProvaRJ && textoCompleto.length > 500) {
-              const dadosGerais = await extrairDadosComIA(textoCompleto);
-              if (!dadosGerais || !dadosGerais.nomeConcurso) continue;
+        if (isFeedExclusivoTI || mencionaAreaTI) {
+          const textoCompleto = await buscarTextoDaPagina(item.link);
+          const textoLower = textoCompleto.toLowerCase();
+          const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
 
-              const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
-              
-              const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
+          if (temIndicioProvaRJ && textoCompleto.length > 500) {
+            const dadosGerais = await extrairDadosComIA(textoCompleto);
+            if (!dadosGerais || !dadosGerais.nomeConcurso) continue;
 
-              if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
-                
-                let linkEditalAnterior = dadosGerais.siteUltimoConcurso;
-                if (linkEditalAnterior === "Não informado") {
-                  linkEditalAnterior = await buscarEditalAnteriorNoGoogle(dadosGerais.nomeConcurso);
-                }
+            const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
+            const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
 
-                const mensagem = `🚨 *Nova Oportunidade (TI): ${dadosGerais.nomeConcurso}*\n\n` +
-                                 `*Status:* ${dadosGerais.estado}\n` +
-                                 `*Banca:* ${dadosGerais.banca}\n` +
-                                 `*Remuneração:* ${dadosGerais.remuneracao}\n` +
-                                 `*Lotação (Trabalho):* ${dadosGerais.locaisTrabalho}\n` +
-                                 `*Local de Prova:* ${dadosGerais.locaisProva}\n` +
-                                 `*Jornada:* ${dadosGerais.modeloTrabalho}\n` +
-                                 `*Provas:* ${dadosGerais.tipoProva}\n\n` +
-                                 `*Edital Anterior:* ${linkEditalAnterior}\n\n` +
-                                 `🔗 [Acessar Notícia Completa](${item.link})`;
-
-                await enviarMensagemTelegram(mensagem);
+            if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
+              let linkEditalAnterior = dadosGerais.siteUltimoConcurso;
+              if (linkEditalAnterior === "Não informado") {
+                linkEditalAnterior = await buscarEditalAnteriorNoGoogle(dadosGerais.nomeConcurso);
               }
+
+              const mensagem = `🚨 *Nova Oportunidade (TI): ${dadosGerais.nomeConcurso}*\n\n` +
+                               `*Status:* ${dadosGerais.estado}\n` +
+                               `*Banca:* ${dadosGerais.banca}\n` +
+                               `*Remuneração:* ${dadosGerais.remuneracao}\n` +
+                               `*Lotação (Trabalho):* ${dadosGerais.locaisTrabalho}\n` +
+                               `*Local de Prova:* ${dadosGerais.locaisProva}\n` +
+                               `*Jornada:* ${dadosGerais.modeloTrabalho}\n` +
+                               `*Provas:* ${dadosGerais.tipoProva}\n\n` +
+                               `*Edital Anterior:* ${linkEditalAnterior}\n\n` +
+                               `🔗 [Acessar Notícia Completa](${item.link})`;
+
+              await enviarMensagemTelegram(mensagem);
+              registrarLink(item.link);
+            } else {
+              // Registra link descartado para não chamar scraping e IA novamente no mesmo dia
+              registrarLink(item.link);
             }
           }
         }
