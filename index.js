@@ -235,7 +235,7 @@ async function extrairDadosComIA(textoPagina) {
     Texto: ${textoPagina.substring(0, 15000)}
   `;
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -245,8 +245,9 @@ async function extrairDadosComIA(textoPagina) {
     });
 
     const data = await response.json();
-    if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
-      return JSON.parse(data.candidates[0].content.parts[0].text);
+    const textoJson = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text;
+    if (textoJson) {
+      return JSON.parse(textoJson);
     }
     console.error("Resposta inesperada do Gemini:", JSON.stringify(data));
     return null;
@@ -274,15 +275,28 @@ const feeds = [
   'https://www.estrategiaconcursos.com.br/blog/feed/',
   'https://www.novaconcursos.com.br/portal/feed/',
   'https://concursosnobrasil.com/feed/',
-  'https://noticiasconcursos.com.br/feed/',
   'https://blog.alfaconcursos.com.br/feed/'
 ];
 
 const termosAreaTI = ['ti', 'tecnologia', 'computação', 'informática', 'sistemas', 'dados', 'software', 'desenvolvedor', 'programador', 'analista'];
 const indiciosProvaRJ = ['rio de janeiro', ' rj ', 'niterói', 'são gonçalo', 'nacional', 'todas as capitais', 'principais capitais'];
 
+function validarConfiguracoes() {
+  const faltantes = [];
+  if (!TELEGRAM_TOKEN) faltantes.push('TELEGRAM_TOKEN');
+  if (!CHAT_ID) faltantes.push('TELEGRAM_CHAT_ID');
+  if (!GEMINI_API_KEY) faltantes.push('GEMINI_API_KEY');
+  if (!GOOGLE_SEARCH_API_KEY) faltantes.push('GOOGLE_SEARCH_API_KEY');
+  if (!GOOGLE_SEARCH_CX) faltantes.push('GOOGLE_SEARCH_CX');
+
+  if (faltantes.length > 0) {
+    console.warn(`\n⚠️ ATENÇÃO: As seguintes Secrets estão vazias no GitHub Actions:\n- ${faltantes.join('\n- ')}\nCertifique-se de adicioná-las em: Settings > Secrets and variables > Actions > Repository secrets no GitHub.\n`);
+  }
+}
+
 // --- LOOP PRINCIPAL ---
 async function monitorarConcursos() {
+  validarConfiguracoes();
   await processarComandosTelegram();
 
   const hoje = new Date();
