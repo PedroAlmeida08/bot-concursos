@@ -3,7 +3,10 @@ name: Monitor de Concursos
 on:
   schedule:
     - cron: '0 11 * * *' # Executa todo dia às 8h BRT
-  workflow_dispatch: # Permite rodar o script manualmente clicando num botão
+  workflow_dispatch: # Permite rodar o script manualmente
+
+permissions:
+  contents: write
 
 jobs:
   run-scraper:
@@ -29,3 +32,10 @@ jobs:
           GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
           GOOGLE_SEARCH_CX: ${{ secrets.GOOGLE_SEARCH_CX }}
         run: node index.js
+
+      - name: Commitar alterações da Blacklist
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add blacklist.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Atualiza blacklist via Telegram" && git push)
