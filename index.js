@@ -13,7 +13,6 @@ const GOOGLE_SEARCH_CX = process.env.GOOGLE_SEARCH_CX;
 const DB_FILE = 'database.json';
 
 if (!fs.existsSync(DB_FILE)) {
-  // Inicializado com órgãos de interesse como exemplo de watchlist padrão
   fs.writeFileSync(DB_FILE, JSON.stringify({ 
     lastUpdateId: 0, 
     blacklist: [], 
@@ -21,22 +20,26 @@ if (!fs.existsSync(DB_FILE)) {
   }));
 }
 let db = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-
-// Garante compatibilidade caso o arquivo antigo (só com blacklist) ainda exista
-if (!db.blacklist) db.blacklist = db.termos || [];
+if (!db.blacklist) db.blacklist = [];
 if (!db.watchlist) db.watchlist = ["bndes", "epe"];
 
-async function enviarMensagemTelegram(texto) {
+// Modificado para aceitar teclados interativos (reply_markup)
+async function enviarMensagemTelegram(texto, reply_markup = null) {
+  const body = { chat_id: CHAT_ID, text: texto, parse_mode: 'Markdown' };
+  if (reply_markup) {
+    body.reply_markup = reply_markup;
+  }
+  
   await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: CHAT_ID, text: texto, parse_mode: 'Markdown' })
+    body: JSON.stringify(body)
   });
 }
 
-// --- PROCESSAMENTO DE COMANDOS DO TELEGRAM ---
+// --- PROCESSAMENTO DE COMANDOS E BOTÕES (CALLBACKS) ---
 async function processarComandosTelegram() {
-  console.log("Checando novos comandos no Telegram...");
+  console.log("Checando novos comandos e cliques no Telegram...");
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${db.lastUpdateId + 1}`;
   
   try {
@@ -47,11 +50,32 @@ async function processarComandosTelegram() {
     if (data.ok && data.result.length > 0) {
       for (const update of data.result) {
         db.lastUpdateId = update.update_id; 
+
+        // 1. Processa Cliques em Botões (Callback Query)
+        if (update.callback_query) {
+          const callbackData = update.callback_query.data;
+          const callbackId = update.callback_query.id;
+
+          if (callbackData.startsWith('add_blk:')) {
+            const termo = callbackData.replace('add_blk:', '').trim();
+            if (!db.blacklist.includes(termo)) db.blacklist.push(termo);
+            respostas.push(`🚫 '${termo}' foi adicionado à Blacklist via botão.`);
+          }
+
+          // Responde à API do Telegram para tirar o ícone de "carregando" do botão
+          await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ callback_query_id: callbackId })
+          });
+          continue; // Pula para a próxima atualização
+        }
         
+        // 2. Processa Comandos de Texto Normais
         if (!update.message || !update.message.text) continue;
         const texto = update.message.text.trim().toLowerCase();
 
-        // Comandos da Blacklist
+        // [MANTIDA A LÓGICA ANTERIOR DE COMANDOS DE TEXTO]
         if (texto.startsWith('/add_blacklist ')) {
           const termo = texto.replace('/add_blacklist ', '').trim();
           if (!db.blacklist.includes(termo)) db.blacklist.push(termo);
@@ -69,8 +93,6 @@ async function processarComandosTelegram() {
           db.blacklist = [];
           respostas.push(`♻️ Blacklist zerada!`);
         }
-        
-        // Comandos da Watchlist
         else if (texto.startsWith('/add_watchlist ')) {
           const termo = texto.replace('/add_watchlist ', '').trim();
           if (!db.watchlist.includes(termo)) db.watchlist.push(termo);
@@ -94,7 +116,7 @@ async function processarComandosTelegram() {
       if (respostas.length > 0) await enviarMensagemTelegram(respostas.join('\n\n'));
     }
   } catch (error) {
-    console.error("Erro ao ler comandos do Telegram:", error);
+    console.error("Erro ao ler interações do Telegram:", error);
   }
 }
 
@@ -102,15 +124,12 @@ async function processarComandosTelegram() {
 async function buscarEditalAnteriorNoGoogle(nomeConcurso) {
   const query = encodeURIComponent(`edital anterior concurso ${nomeConcurso}`);
   const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_SEARCH_API_KEY}&cx=${GOOGLE_SEARCH_CX}&q=${query}&num=1`;
-
   try {
     const res = await fetch(url);
     const data = await res.json();
     if (data.items && data.items.length > 0) return `[${data.items[0].title}](${data.items[0].link})`;
     return "Não encontrado na busca automática.";
-  } catch (error) {
-    return "Erro na busca.";
-  }
+  } catch (error) { return "Erro na busca."; }
 }
 
 async function extrairDadosComIA(textoPagina) {
@@ -131,7 +150,6 @@ async function extrairDadosComIA(textoPagina) {
     Se alguma informação não existir, preencha com "Não informado".
     Texto: ${textoPagina.substring(0, 15000)}
   `;
-
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -140,7 +158,6 @@ async function extrairDadosComIA(textoPagina) {
       generationConfig: { responseMimeType: "application/json" } 
     })
   });
-
   const data = await response.json();
   return JSON.parse(data.candidates[0].content.parts[0].text);
 }
@@ -151,12 +168,9 @@ async function buscarTextoDaPagina(url) {
     const html = await res.text();
     const $= cheerio.load(html);$('script, style, nav, footer, header').remove();
     return $('body').text().replace(/\s+/g, ' ').trim();
-  } catch (e) {
-    return "";
-  }
+  } catch (e) { return ""; }
 }
 
-// --- VARIÁVEIS DE MONITORAMENTO ---
 const feeds = [
   'https://www.pciconcursos.com.br/rss/sudeste/',
   'https://www.pciconcursos.com.br/rss/nacional/',
@@ -172,7 +186,6 @@ const feeds = [
 const termosAreaTI = ['ti', 'tecnologia', 'computação', 'informática', 'sistemas', 'dados', 'software', 'desenvolvedor', 'programador', 'analista'];
 const indiciosProvaRJ = ['rio de janeiro', ' rj ', 'niterói', 'são gonçalo', 'nacional', 'todas as capitais', 'principais capitais'];
 
-// --- LOOP PRINCIPAL ---
 async function monitorarConcursos() {
   await processarComandosTelegram();
 
@@ -188,19 +201,15 @@ async function monitorarConcursos() {
 
       if (dataPublicacao >= ontem) {
         
-        // 1. VERIFICAÇÃO DE WATCHLIST (Passe Livre)
         const estaNaWatchlist = db.watchlist.some(termo => titulo.includes(termo));
-        
         if (estaNaWatchlist) {
-          console.log(`Radar ativado para: ${item.title}`);
           const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
                                 `📌 *Notícia:* ${item.title}\n` +
                                 `🔗 [Acessar Notícia Completa](${item.link})`;
           await enviarMensagemTelegram(mensagemRadar);
-          continue; // Pula a análise de TI e IA para esta notícia
+          continue; 
         }
 
-        // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
         const isFeedExclusivoTI = feedUrl.includes('informatica');
         const mencionaAreaTI = termosAreaTI.some(t => titulo.includes(t));
 
@@ -212,7 +221,6 @@ async function monitorarConcursos() {
           if (temIndicioProvaRJ && textoCompleto.length > 500) {
             const dadosGerais = await extrairDadosComIA(textoCompleto);
             const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
-            
             const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
 
             if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
@@ -226,14 +234,31 @@ async function monitorarConcursos() {
                                `*Status:* ${dadosGerais.estado}\n` +
                                `*Banca:* ${dadosGerais.banca}\n` +
                                `*Remuneração:* ${dadosGerais.remuneracao}\n` +
-                               `*Lotação (Trabalho):* ${dadosGerais.locaisTrabalho}\n` +
+                               `*Lotação:* ${dadosGerais.locaisTrabalho}\n` +
                                `*Local de Prova:* ${dadosGerais.locaisProva}\n` +
                                `*Jornada:* ${dadosGerais.modeloTrabalho}\n` +
                                `*Provas:* ${dadosGerais.tipoProva}\n\n` +
                                `*Edital Anterior:* ${linkEditalAnterior}\n\n` +
                                `🔗 [Acessar Notícia Completa](${item.link})`;
 
-              await enviarMensagemTelegram(mensagem);
+              // --- CRIAÇÃO DO BOTÃO INTERATIVO ---
+              // Limitamos a string a 40 caracteres porque a API do Telegram 
+              // tem limite rígido de 64 bytes para o callback_data
+              const termoBotao = nomeConcursoLower.substring(0, 40).trim();
+              
+              const tecladoInterativo = {
+                inline_keyboard: [
+                  [
+                    { 
+                      text: "🚫 Ignorar Próximos (Blacklist)", 
+                      callback_data: `add_blk:${termoBotao}` 
+                    }
+                  ]
+                ]
+              };
+
+              // Agora passamos o teclado como segundo parâmetro
+              await enviarMensagemTelegram(mensagem, tecladoInterativo);
             }
           }
         }
