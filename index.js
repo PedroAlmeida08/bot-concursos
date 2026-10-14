@@ -315,8 +315,9 @@ async function monitorarConcursos() {
 
   for (const feedUrl of feeds) {
     try {
-      console.log(`Verificando feed: ${feedUrl}`);
+      console.log(`\n📡 Verificando feed: ${feedUrl}`);
       const feed = await parser.parseURL(feedUrl);
+      console.log(`   Total de itens lidos: ${feed.items?.length || 0}`);
       
       for (const item of feed.items) {
         if (!item.link) continue;
@@ -338,7 +339,7 @@ async function monitorarConcursos() {
         const estaNaWatchlist = db.watchlist.some(termo => textoItem.includes(termo));
         
         if (estaNaWatchlist) {
-          console.log(`Radar ativado para: ${item.title}`);
+          console.log(`🎯 Radar ativado para: "${item.title}" -> Enviando!`);
           const mensagemRadar = `🎯 *RADAR ATIVADO: Movimentação Detectada!*\n\n` +
                                 `📌 *Notícia:* ${item.title}\n` +
                                 `🔗 [Acessar Notícia Completa](${item.link})`;
@@ -352,19 +353,28 @@ async function monitorarConcursos() {
         const mencionaAreaTI = regexTI.test(textoItem);
 
         if (isFeedExclusivoTI || mencionaAreaTI) {
+          console.log(`🔎 Potencial vaga de TI: "${item.title}"`);
           const textoCompleto = await buscarTextoDaPagina(item.link);
           const textoLower = textoCompleto.toLowerCase();
           const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
 
           if (temIndicioProvaRJ && textoCompleto.length > 500) {
+            console.log(`🤖 Analisando edital com IA: "${item.title}"`);
             await sleep(1500); // Pausa para respeitar os limites de requisições por minuto da IA
             const dadosGerais = await extrairDadosComIA(textoCompleto);
-            if (!dadosGerais || !dadosGerais.nomeConcurso) continue;
+            if (!dadosGerais || !dadosGerais.nomeConcurso) {
+              console.log(`   ❌ IA não retornou formato válido.`);
+              continue;
+            }
 
             const nomeConcursoLower = dadosGerais.nomeConcurso.toLowerCase();
             const estaNaBlacklist = db.blacklist.some(termo => nomeConcursoLower.includes(termo));
 
-            if (!estaNaBlacklist && dadosGerais.aplicaProvaRJ === true) {
+            if (estaNaBlacklist) {
+              console.log(`   ⛔ Bloqueado pela Blacklist: "${dadosGerais.nomeConcurso}"`);
+              registrarLink(item.link);
+            } else if (dadosGerais.aplicaProvaRJ === true) {
+              console.log(`   ✅ CONFIRMADO (TI + RJ): "${dadosGerais.nomeConcurso}" -> Notificando!`);
               let linkEditalAnterior = dadosGerais.siteUltimoConcurso;
               if (linkEditalAnterior === "Não informado") {
                 linkEditalAnterior = await buscarEditalAnteriorNoGoogle(dadosGerais.nomeConcurso);
@@ -384,7 +394,7 @@ async function monitorarConcursos() {
               await enviarMensagemTelegram(mensagem);
               registrarLink(item.link);
             } else {
-              // Registra link descartado para não chamar scraping e IA novamente no mesmo dia
+              console.log(`   ⏩ Descartado pela IA (Prova fora do RJ): "${dadosGerais.nomeConcurso}"`);
               registrarLink(item.link);
             }
           }
