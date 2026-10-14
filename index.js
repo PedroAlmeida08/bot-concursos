@@ -288,9 +288,10 @@ const feeds = [
   'https://blog.alfaconcursos.com.br/feed/'
 ];
 
-// Regex com limites de palavra (\b) para evitar falsos positivos como "participar", "garantir", "analista administrativo"
+// Regex com limites de palavra (\b) para evitar falsos positivos
 const regexTI = /\b(ti|t\.i\.|tecnologia da informação|tecnologia da informacao|ciência da computação|ciencia da computacao|computação|computacao|informática|informatica|desenvolvedor|desenvolvedora|programador|programadora|software|engenharia de software|segurança da informação|seguranca da informacao|analista de ti|analista de sistemas|analista de dados|cientista de dados|banco de dados)\b/i;
-const indiciosProvaRJ = ['rio de janeiro', ' rj ', 'niterói', 'são gonçalo', 'nacional', 'todas as capitais', 'principais capitais'];
+const regexRJ = /\b(rj|rio de janeiro|fluminense|niterói|niteroi|são gonçalo|sao goncalo|maricá|marica|petrópolis|petropolis|caxias|nova iguaçu|nova iguacu)\b/i;
+const indiciosProvaRJ = ['rio de janeiro', ' rj ', 'fluminense', 'niterói', 'são gonçalo', 'nacional', 'todas as capitais', 'principais capitais'];
 
 function validarConfiguracoes() {
   const faltantes = [];
@@ -350,16 +351,17 @@ async function monitorarConcursos() {
 
         // 2. VERIFICAÇÃO PADRÃO (TI + RJ)
         const isFeedExclusivoTI = feedUrl.includes('informatica');
-        const mencionaAreaTI = regexTI.test(textoItem);
+        const temIndicioInicial = isFeedExclusivoTI || regexTI.test(textoItem) || regexRJ.test(textoItem);
 
-        if (isFeedExclusivoTI || mencionaAreaTI) {
-          console.log(`🔎 Potencial vaga de TI: "${item.title}"`);
+        if (temIndicioInicial) {
+          console.log(`🔎 Candidato a edital (TI/RJ): "${item.title}"`);
           const textoCompleto = await buscarTextoDaPagina(item.link);
           const textoLower = textoCompleto.toLowerCase();
-          const temIndicioProvaRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
+          const temIndicioTI = isFeedExclusivoTI || regexTI.test(textoCompleto);
+          const temIndicioRJ = indiciosProvaRJ.some(t => textoLower.includes(t));
 
-          if (temIndicioProvaRJ && textoCompleto.length > 500) {
-            console.log(`🤖 Analisando edital com IA: "${item.title}"`);
+          if (temIndicioTI && temIndicioRJ && textoCompleto.length > 500) {
+            console.log(`🤖 Analisando com IA (TI e RJ confirmados na página): "${item.title}"`);
             await sleep(1500); // Pausa para respeitar os limites de requisições por minuto da IA
             const dadosGerais = await extrairDadosComIA(textoCompleto);
             if (!dadosGerais || !dadosGerais.nomeConcurso) {
